@@ -39,8 +39,15 @@ pip install -r requirements.txt
 ```
 
 3. 配置环境变量：
-- `GEMINI_API_KEY`：Google Gemini API 密钥
-- `GITHUB_TOKEN`：GitHub 个人访问令牌（用于自动同步）
+
+必需的环境变量：
+- `GEMINI_API_KEY`：Google Gemini API 密钥，用于调用 AI 生成文章综述
+- `GITHUB_TOKEN`：GitHub 个人访问令牌，用于自动同步更新到仓库
+- `GIT_REPO_URL`：Git 仓库地址，用于自动同步代码
+
+可选的环境变量：
+- `MODEL_NAME`：Gemini 模型名称，默认为 `gemini-2.5-pro-preview-03-25`
+- `PING_URL`：服务保活 URL，用于定期发送心跳请求保持服务运行
 
 4. 运行服务：
 ```bash
