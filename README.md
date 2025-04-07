@@ -42,7 +42,7 @@ pip install -r requirements.txt
 
 必需的环境变量：
 - `GEMINI_API_KEY`：Google Gemini API 密钥，用于调用 AI 生成文章综述
-- `GITHUB_TOKEN`：GitHub 个人访问令牌，用于自动同步更新到仓库
+- `GIT_TOKEN`：GitHub 个人访问令牌，用于自动同步更新到仓库
 - `GIT_REPO_URL`：Git 仓库地址，用于自动同步代码
 
 可选的环境变量：
