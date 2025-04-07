@@ -9,6 +9,7 @@ import atlantic_rss_reader
 import gemini_summarizer
 import rss_generator
 import github_sync
+from contextlib import asynccontextmanager
 
 # 创建FastAPI应用
 app = FastAPI()
@@ -87,9 +88,10 @@ async def get_feed():
 async def health_check():
     return {"status": "ok"}
 
-# 启动时执行的初始化函数
-@app.on_event("startup")
-async def startup_event():
+# 创建lifespan上下文管理器
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # 启动时执行的初始化函数
     # 1. 初始化时同步feed.xml
     github_sync.main()
     
@@ -118,8 +120,13 @@ async def startup_event():
     
     # 启动调度器
     scheduler.start()
-
-# 关闭时执行的清理函数
-@app.on_event("shutdown")
-async def shutdown_event():
+    
+    yield
+    
+    # 关闭时执行的清理函数
     scheduler.shutdown()
+
+# 创建FastAPI应用并注册lifespan
+app = FastAPI(lifespan=lifespan)
+
+# 删除原有的@app.on_event装饰器函数
