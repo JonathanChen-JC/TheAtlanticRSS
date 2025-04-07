@@ -1,21 +1,22 @@
 import os
 import datetime
 import pytz
-from fastapi import FastAPI, Response
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from flask import Flask, Response
+from flask_apscheduler import APScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 import atlantic_rss_reader
 import gemini_summarizer
 import rss_generator
 import github_sync
-from contextlib import asynccontextmanager
+import httpx
 
-# 创建FastAPI应用
-app = FastAPI()
+# 创建Flask应用
+app = Flask(__name__)
 
 # 创建调度器
-scheduler = AsyncIOScheduler()
+scheduler = APScheduler()
+scheduler.init_app(app)
 
 # 获取北京时间
 def get_beijing_time():
@@ -23,7 +24,7 @@ def get_beijing_time():
     return datetime.datetime.now(beijing)
 
 # 主要任务流程
-async def process_articles():
+def process_articles():
     try:
         # 1. 抓取文章
         rss_content = atlantic_rss_reader.fetch_rss_feed()
@@ -73,60 +74,54 @@ async def process_articles():
     except Exception as e:
         print(f"处理文章时出错: {str(e)}")
 
-# FastAPI路由
-@app.get("/feed.xml")
-async def get_feed():
+# Flask路由
+@app.route("/feed.xml")
+def get_feed():
     try:
         with open(rss_generator.FEED_FILE, 'r', encoding='utf-8') as f:
             content = f.read()
-        return Response(content=content, media_type="application/xml")
+        return Response(content, mimetype="application/xml")
     except Exception as e:
         print(f"读取feed.xml失败: {str(e)}")
-        return Response(content="Feed not found", status_code=404)
+        return Response("Feed not found", status=404)
 
-@app.get("/health")
-async def health_check():
+@app.route("/health")
+def health_check():
     return {"status": "ok"}
 
-# 创建lifespan上下文管理器
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    # 启动时执行的初始化函数
+# 初始化函数
+def init_app():
     # 1. 初始化时同步feed.xml
     github_sync.main()
     
     # 2. 设置定时任务 - 每天北京时间中午12点执行
     scheduler.add_job(
-        process_articles,
-        CronTrigger(hour=12, minute=0, timezone=pytz.timezone('Asia/Shanghai'))
+        id='process_articles',
+        func=process_articles,
+        trigger=CronTrigger(hour=12, minute=0, timezone=pytz.timezone('Asia/Shanghai'))
     )
     
     # 3. 设置保活任务 - 如果设置了URL，每5分钟ping一次
     ping_url = os.environ.get('PING_URL')
     if ping_url:
-        import httpx
-        async def ping_self():
+        def ping_self():
             try:
-                async with httpx.AsyncClient() as client:
-                    await client.get(ping_url)
+                with httpx.Client() as client:
+                    client.get(ping_url)
                     print(f"Successfully pinged {ping_url}")
             except Exception as e:
                 print(f"Ping failed: {str(e)}")
         
         scheduler.add_job(
-            ping_self,
-            IntervalTrigger(minutes=5)
+            id='ping_self',
+            func=ping_self,
+            trigger=IntervalTrigger(minutes=5)
         )
-    
-    # 启动调度器
-    scheduler.start()
-    
-    yield
-    
-    # 关闭时执行的清理函数
-    scheduler.shutdown()
 
-# 创建FastAPI应用并注册lifespan
-app = FastAPI(lifespan=lifespan)
+# 初始化应用
+init_app()
+# 启动调度器
+scheduler.start()
 
-# 删除原有的@app.on_event装饰器函数
+if __name__ == "__main__":
+    app.run(host='0.0.0.0', port=8000)
