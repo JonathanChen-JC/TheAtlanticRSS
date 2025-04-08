@@ -94,38 +94,51 @@ def get_remote_feed():
         return None
 
 def compare_feeds(local_feed, remote_feed):
-    """比较本地和远程的feed.xml"""
+    """比较本地和远程的feed.xml的lastBuildDate来决定使用哪个文件"""
     try:
-        logging.info("开始比较本地和远程feed文件")
+        logging.info("开始比较本地和远程feed文件的lastBuildDate")
         
         # 解析本地文件
         try:
             local_tree = ET.parse(local_feed)
-            local_items = local_tree.findall('.//item')
-            logging.info(f"本地feed包含{len(local_items)}个条目")
+            local_build_date = local_tree.find('.//lastBuildDate')
+            if local_build_date is None:
+                logging.error("本地feed.xml中未找到lastBuildDate标签")
+                return 'remote'
+            logging.info(f"本地feed的lastBuildDate: {local_build_date.text}")
         except ET.ParseError as e:
             logging.error(f"解析本地feed.xml失败：{str(e)}")
-            return True
+            return 'remote'
         
         # 解析远程内容
         try:
             remote_tree = ET.fromstring(remote_feed)
-            remote_items = remote_tree.findall('.//item')
-            logging.info(f"远程feed包含{len(remote_items)}个条目")
+            remote_build_date = remote_tree.find('.//lastBuildDate')
+            if remote_build_date is None:
+                logging.error("远程feed.xml中未找到lastBuildDate标签")
+                return 'local'
+            logging.info(f"远程feed的lastBuildDate: {remote_build_date.text}")
         except ET.ParseError as e:
             logging.error(f"解析远程feed.xml失败：{str(e)}")
-            return True
+            return 'local'
         
-        # 比较条目数量
-        needs_sync = len(local_items) != len(remote_items)
-        if needs_sync:
-            logging.info("检测到feed内容不同，需要同步")
+        # 比较lastBuildDate
+        from datetime import datetime
+        local_date = datetime.strptime(local_build_date.text, '%a, %d %b %Y %H:%M:%S %z')
+        remote_date = datetime.strptime(remote_build_date.text, '%a, %d %b %Y %H:%M:%S %z')
+        
+        if local_date > remote_date:
+            logging.info("本地feed更新，使用本地文件")
+            return 'local'
+        elif remote_date > local_date:
+            logging.info("远程feed更新，使用远程文件")
+            return 'remote'
         else:
-            logging.info("feed内容相同，无需同步")
-        return needs_sync
+            logging.info("feed的lastBuildDate相同，无需更改")
+            return 'same'
     except Exception as e:
         logging.error(f"比较feed.xml时发生未知错误：{str(e)}")
-        return True  # 如果无法比较，默认需要同步
+        return 'local'  # 如果无法比较，默认使用本地文件
 
 def sync_to_repo():
     """同步到Git仓库"""
@@ -247,12 +260,17 @@ def main():
             logging.error("无法获取远程feed内容，同步操作终止")
             return
             
-        # 比较并同步
-        if compare_feeds(local_feed, remote_feed):
-            logging.info("检测到需要同步的更改")
+        # 比较文件并决定使用哪个
+        result = compare_feeds(local_feed, remote_feed)
+        if result == 'remote':
+            logging.info("使用远程feed.xml更新本地文件")
+            with open(local_feed, 'w', encoding='utf-8') as f:
+                f.write(remote_feed)
+        elif result == 'local':
+            logging.info("使用本地feed.xml更新远程文件")
             sync_to_repo()
         else:
-            logging.info("无需同步")
+            logging.info("本地和远程feed.xml内容一致，无需更新")
         
         # 更新RSS URL
         update_rss_url()

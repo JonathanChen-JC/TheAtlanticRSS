@@ -6,6 +6,9 @@ import xml.etree.ElementTree as ET
 import html
 import re
 from bs4 import BeautifulSoup
+from email.utils import parsedate_to_datetime
+from datetime import timezone
+from zoneinfo import ZoneInfo
 
 # RSS源URL
 RSS_URL = "https://www.theatlantic.com/feed/all/"
@@ -46,9 +49,28 @@ def fetch_rss_feed():
         print(f"详细错误信息: {repr(e)}")
         return None
 
+def get_last_build_date():
+    """从feed.xml获取上次构建时间(GMT+0)"""
+    try:
+        if not os.path.exists('feed.xml'):
+            return None
+        tree = ET.parse('feed.xml')
+        root = tree.getroot()
+        last_build_date = root.find('.//lastBuildDate')
+        if last_build_date is not None and last_build_date.text:
+            return parsedate_to_datetime(last_build_date.text)
+        return None
+    except Exception as e:
+        print(f"获取lastBuildDate失败: {str(e)}")
+        return None
+
 def parse_rss(xml_content):
     """解析RSS XML内容"""
     try:
+        # 获取上次构建时间
+        last_build_date = get_last_build_date()
+        print(f"上次构建时间: {last_build_date}")
+        
         # 解析XML
         root = ET.fromstring(xml_content)
         
@@ -81,7 +103,16 @@ def parse_rss(xml_content):
             # 提取发布日期
             published_elem = item.find('atom:published', namespaces)
             if published_elem is not None and published_elem.text:
-                entry['published'] = published_elem.text
+                # 将ET时间转换为GMT+0时间进行比较
+                et_time = datetime.datetime.fromisoformat(published_elem.text.replace('Z', '+00:00'))
+                et_time = et_time.astimezone(ZoneInfo('America/New_York'))
+                gmt_time = et_time.astimezone(timezone.utc)
+                
+                # 只保留比lastBuildDate新的文章
+                if last_build_date is None or gmt_time > last_build_date:
+                    entry['published'] = published_elem.text
+                else:
+                    continue
             else:
                 entry['published'] = '未知日期'
             
