@@ -83,7 +83,25 @@ def generate_feed():
         for item in existing_items:
             guid = item.find('guid')
             if guid is not None:
-                existing_dates.add(guid.text.split('/')[-1])
+                guid_text = guid.text.split('/')[-1]
+                existing_dates.add(guid_text)
+                
+                # 将现有条目添加到新的feed中
+                fe = fg.add_entry()
+                fe.id(guid.text)
+                title = item.find('title')
+                if title is not None:
+                    fe.title(title.text)
+                link = item.find('link')
+                if link is not None:
+                    fe.link(href=link.text)
+                description = item.find('description')
+                if description is not None:
+                    fe.description(description.text)
+                pubDate = item.find('pubDate')
+                if pubDate is not None:
+                    fe.published(pubDate.text)
+                    fe.updated(pubDate.text)
     
     brief_files = get_brief_files()
     if not brief_files:
@@ -103,7 +121,7 @@ def generate_feed():
             fe.id(f'https://www.theatlantic.com/daily-brief/{file_path.stem}')
             fe.title(brief['title'])
             fe.link(href=f'https://www.theatlantic.com/daily-brief/{file_path.stem}')
-            fe.content(brief['content'], type='html')
+            fe.description(brief['content'])
             fe.published(brief['date'])
             fe.updated(brief['date'])
             print(f"已添加新文章：{brief['title']}")
