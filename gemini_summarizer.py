@@ -78,7 +78,7 @@ def load_articles(date_str=None):
     try:
         # 如果未指定日期，使用当前美东时间的日期
         if not date_str:
-            now = get_eastern_time()
+            now = get_beijing_time()
             date_str = now.strftime("%Y%m%d")
         
         # 构建文件路径
@@ -192,7 +192,7 @@ def save_daily_brief(content, date_str=None):
     try:
         # 如果未指定日期，使用当前美东时间的日期
         if not date_str:
-            now = get_eastern_time()
+            now = get_beijing_time()
             date_str = now.strftime("%Y%m%d")
         
         # 确保目录存在
