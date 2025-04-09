@@ -47,11 +47,12 @@ def setup_git_config():
             logging.info(f"更新远程仓库URL：{GIT_REPO_URL}")
             origin.set_url(GIT_REPO_URL)
         
-        with repo.config_writer() as git_config:
-            git_config.set_value("user", "name", "AtlanticBriefBot")
-            git_config.set_value("user", "email", "bot@example.com")
-            # 确保使用HTTPS
-            git_config.set_value("credential.helper", "store")
+        # 设置Git配置
+        config = repo.config_writer()
+        config.set_value('user', 'name', 'AtlanticBriefBot')
+        config.set_value('user', 'email', 'bot@example.com')
+        config.set_value('credential.helper', 'store')
+        config.release()  # 确保配置被保存
         
         return repo
     except Exception as e:
