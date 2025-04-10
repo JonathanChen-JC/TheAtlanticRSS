@@ -77,6 +77,8 @@ def setup_git_config():
                     # 如果没有main或master分支，创建main分支
                     logger.info("未找到main或master分支，创建main分支")
                     repo.git.checkout('-b', 'main')
+                
+                # 不在这里设置上游分支，而是在push时设置
             except Exception as e:
                 logger.error(f"切换分支失败：{str(e)}")
                 return None
@@ -178,7 +180,10 @@ def sync_to_repo():
         logger.info(f"创建提交：{commit.hexsha}")
         
         origin = repo.remote()
-        push_info = origin.push()
+        # 使用-u参数设置上游分支
+        current_branch = repo.active_branch.name
+        logger.info(f"推送并设置上游分支：origin/{current_branch}")
+        push_info = origin.push(f"{current_branch}:refs/heads/{current_branch}", u=True)
         
         for info in push_info:
             if info.flags & info.ERROR:
