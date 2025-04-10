@@ -5,11 +5,10 @@ import os
 import sys
 import base64
 import requests
-from git import Repo
-from pathlib import Path
-import xml.etree.ElementTree as ET
 import logging
+import xml.etree.ElementTree as ET
 from datetime import datetime
+from pathlib import Path
 
 # 配置日志
 logging.basicConfig(
@@ -38,65 +37,22 @@ if not GIT_TOKEN.strip():
 if not GIT_REPO_URL.startswith('https://github.com/'):
     raise ValueError("GIT_REPO_URL必须是有效的GitHub仓库URL")
 
-# 构建包含token的Git URL
-GIT_AUTH_URL = GIT_REPO_URL.replace('https://', f'https://{GIT_TOKEN}@')
+# 从GIT_REPO_URL中提取仓库所有者和名称
+repo_parts = GIT_REPO_URL.replace('https://github.com/', '').split('/')
+if len(repo_parts) >= 2:
+    REPO_OWNER = repo_parts[0]
+    REPO_NAME = repo_parts[1].replace('.git', '')
+else:
+    raise ValueError("无法从GIT_REPO_URL解析仓库所有者和名称")
 
-def setup_git_config():
-    """设置Git配置"""
-    try:
-        logger.info(f"正在初始化Git仓库：{REPO_PATH}")
-        repo = Repo(REPO_PATH)
-        
-        try:
-            origin = repo.remote()
-            logger.info(f"当前远程仓库URL：{origin.url}")
-        except ValueError:
-            logger.info("未找到远程仓库，正在添加...")
-            origin = repo.create_remote('origin', GIT_AUTH_URL)
-        
-        if origin.url != GIT_AUTH_URL:
-            logger.info("更新远程仓库URL")
-            origin.set_url(GIT_AUTH_URL)
-        
-        # 检查当前分支状态并确保在有效分支上
-        try:
-            current_branch = repo.active_branch.name
-            logger.info(f"当前分支：{current_branch}")
-        except TypeError:
-            # 处于detached HEAD状态
-            logger.info("检测到处于detached HEAD状态，尝试切换到主分支")
-            # 尝试切换到main或master分支
-            try:
-                if 'main' in [b.name for b in repo.branches]:
-                    repo.git.checkout('main')
-                    logger.info("已切换到main分支")
-                elif 'master' in [b.name for b in repo.branches]:
-                    repo.git.checkout('master')
-                    logger.info("已切换到master分支")
-                else:
-                    # 如果没有main或master分支，创建main分支
-                    logger.info("未找到main或master分支，创建main分支")
-                    repo.git.checkout('-b', 'main')
-                
-                # 不在这里设置上游分支，而是在push时设置
-            except Exception as e:
-                logger.error(f"切换分支失败：{str(e)}")
-                return None
-        
-        config = repo.config_writer()
-        config.set_value('user', 'name', 'AtlanticBriefBot')
-        config.set_value('user', 'email', 'bot@example.com')
-        config.release()
-        
-        return repo
-    except Exception as e:
-        logger.error(f"设置Git配置失败：{str(e)}")
-        return None
 
 def get_remote_feed():
     """从GitHub API获取feed.xml内容"""
     try:
-        api_url = f"{GIT_REPO_URL.replace('github.com', 'api.github.com/repos')}/contents/{FEED_FILE}"
+        # 构建API URL
+        api_url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/contents/{FEED_FILE}"
+        
+        # 设置请求头
         headers = {
             'Authorization': f'Bearer {GIT_TOKEN}',
             'Accept': 'application/vnd.github.v3+json'
@@ -104,20 +60,74 @@ def get_remote_feed():
         
         logger.info(f"正在从GitHub API获取文件内容")
         response = requests.get(api_url, headers=headers)
-        response.raise_for_status()
         
-        content = response.json().get('content', '')
-        if not content:
-            logger.error("API响应中没有找到content字段")
+        # 检查响应
+        if response.status_code == 200:
+            # 解码内容
+            content_data = response.json()
+            if content_data.get("encoding") == "base64":
+                content = base64.b64decode(content_data["content"]).decode("utf-8")
+                logger.info(f"成功从GitHub获取文件: {FEED_FILE}")
+                return content
+            else:
+                logger.error(f"不支持的编码: {content_data.get('encoding')}")
+        elif response.status_code == 404:
+            logger.warning(f"GitHub上未找到文件: {FEED_FILE}")
             return None
+        else:
+            logger.error(f"获取GitHub文件失败，状态码: {response.status_code}, 响应: {response.text}")
         
-        return base64.b64decode(content).decode('utf-8')
-    except requests.exceptions.RequestException as e:
-        logger.error(f"GitHub API请求失败：{str(e)}")
         return None
     except Exception as e:
-        logger.error(f"获取远程feed.xml失败：{str(e)}")
+        logger.error(f"从GitHub获取文件时出错: {str(e)}")
         return None
+
+
+def update_github_file(content, commit_message="Update feed.xml"):
+    """更新GitHub上的文件"""
+    try:
+        # 构建API URL
+        api_url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/contents/{FEED_FILE}"
+        
+        # 设置请求头
+        headers = {
+            'Authorization': f'Bearer {GIT_TOKEN}',
+            'Accept': 'application/vnd.github.v3+json'
+        }
+        
+        # 获取当前文件信息以获取SHA
+        response = requests.get(api_url, headers=headers)
+        
+        # 准备更新数据
+        update_data = {
+            "message": commit_message,
+            "content": base64.b64encode(content.encode("utf-8")).decode("utf-8"),
+            "branch": "main"  # 默认使用main分支
+        }
+        
+        # 如果文件已存在，添加SHA
+        if response.status_code == 200:
+            file_sha = response.json()["sha"]
+            update_data["sha"] = file_sha
+        elif response.status_code != 404:
+            logger.error(f"获取文件信息失败，状态码: {response.status_code}, 响应: {response.text}")
+            return False
+        
+        # 发送更新请求
+        response = requests.put(api_url, headers=headers, json=update_data)
+        
+        # 检查响应
+        if response.status_code in [200, 201]:
+            logger.info(f"成功更新GitHub文件: {FEED_FILE}")
+            return True
+        else:
+            logger.error(f"更新GitHub文件失败，状态码: {response.status_code}, 响应: {response.text}")
+            return False
+    
+    except Exception as e:
+        logger.error(f"更新GitHub文件时出错: {str(e)}")
+        return False
+
 
 def parse_build_date(xml_content, is_file=False):
     """解析XML中的lastBuildDate"""
@@ -136,6 +146,7 @@ def parse_build_date(xml_content, is_file=False):
     except (ET.ParseError, ValueError) as e:
         logger.error(f"解析lastBuildDate失败：{str(e)}")
         return None
+
 
 def compare_feeds(local_feed, remote_feed):
     """比较本地和远程feed的lastBuildDate"""
@@ -164,37 +175,32 @@ def compare_feeds(local_feed, remote_feed):
         logger.info("feed的lastBuildDate相同，无需更改")
         return 'same'
 
+
 def sync_to_repo():
-    """同步本地更改到Git仓库"""
+    """同步本地更改到GitHub仓库"""
     try:
-        repo = setup_git_config()
-        if not repo:
+        # 读取本地文件内容
+        local_feed = Path(FEED_FILE)
+        if not local_feed.exists():
+            logger.error(f"本地文件不存在: {FEED_FILE}")
             return False
+            
+        with open(local_feed, 'r', encoding='utf-8') as f:
+            local_content = f.read()
         
-        if not repo.git.status(porcelain=True):
-            logger.info("没有需要同步的更改")
-            return True
+        # 更新GitHub文件
+        success = update_github_file(local_content, "Update feed.xml")
         
-        repo.index.add([FEED_FILE])
-        commit = repo.index.commit("Update feed.xml")
-        logger.info(f"创建提交：{commit.hexsha}")
+        if success:
+            logger.info("成功同步到GitHub仓库")
+        else:
+            logger.error("同步到GitHub仓库失败")
         
-        origin = repo.remote()
-        # 使用-u参数设置上游分支
-        current_branch = repo.active_branch.name
-        logger.info(f"推送并设置上游分支：origin/{current_branch}")
-        push_info = origin.push(f"{current_branch}:refs/heads/{current_branch}", u=True)
-        
-        for info in push_info:
-            if info.flags & info.ERROR:
-                logger.error(f"推送失败：{info.summary}")
-                return False
-        
-        logger.info("成功同步到Git仓库")
-        return True
+        return success
     except Exception as e:
-        logger.error(f"同步到Git仓库失败：{str(e)}")
+        logger.error(f"同步到GitHub仓库失败：{str(e)}")
         return False
+
 
 def main():
     """主函数"""
@@ -230,6 +236,7 @@ def main():
         logger.info("Git同步操作完成")
     except Exception as e:
         logger.error(f"同步操作失败：{str(e)}")
+
 
 if __name__ == "__main__":
     main()
