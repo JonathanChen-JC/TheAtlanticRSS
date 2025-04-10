@@ -58,6 +58,29 @@ def setup_git_config():
             logger.info("更新远程仓库URL")
             origin.set_url(GIT_AUTH_URL)
         
+        # 检查当前分支状态并确保在有效分支上
+        try:
+            current_branch = repo.active_branch.name
+            logger.info(f"当前分支：{current_branch}")
+        except TypeError:
+            # 处于detached HEAD状态
+            logger.info("检测到处于detached HEAD状态，尝试切换到主分支")
+            # 尝试切换到main或master分支
+            try:
+                if 'main' in [b.name for b in repo.branches]:
+                    repo.git.checkout('main')
+                    logger.info("已切换到main分支")
+                elif 'master' in [b.name for b in repo.branches]:
+                    repo.git.checkout('master')
+                    logger.info("已切换到master分支")
+                else:
+                    # 如果没有main或master分支，创建main分支
+                    logger.info("未找到main或master分支，创建main分支")
+                    repo.git.checkout('-b', 'main')
+            except Exception as e:
+                logger.error(f"切换分支失败：{str(e)}")
+                return None
+        
         config = repo.config_writer()
         config.set_value('user', 'name', 'AtlanticBriefBot')
         config.set_value('user', 'email', 'bot@example.com')
