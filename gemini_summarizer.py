@@ -9,6 +9,7 @@ import requests
 import logging
 import sys
 import argparse
+import time # 新增导入 time 模块
 
 # 设置日志
 log_format = '%(asctime)s [%(name)s] %(levelname)s: %(message)s'
@@ -60,6 +61,7 @@ DEFAULT_PROMPT = """你是一位资深新闻编辑，请对这份The Atlantic的
 2. 以'# The Atlantic 每日综述 - {日期}'作为标题
 3. 每篇文章的综述使用二级标题(##)，保留原文标题
 4. 在每篇文章综述下注明原文发布时间
+5. 综述的语言要求：简体中文
 
 # 内容要求
 1. 准确提炼每篇文章的核心论点和关键信息
@@ -128,64 +130,93 @@ def load_articles(date_str=None):
 
 def call_gemini_api(api_key=None, prompt=None, articles=None):
     """调用Gemini API生成摘要"""
-    try:
-        # 如果未提供API密钥，从环境变量获取
-        if api_key is None:
-            api_key = os.environ.get("GEMINI_API_KEY")
-            if not api_key:
-                logger.error("未提供API密钥且环境变量GEMINI_API_KEY未设置")
-                return None
-        
-        # 构建请求数据
-        # 修改API请求参数
-        request_data = {
-            "contents": [
-                {
-                    "parts": [
-                        {"text": prompt},
-                        {"text": json.dumps(articles, ensure_ascii=False)}
-                    ]
+    max_retries = 5
+    retry_delay = 120  # 2分钟，单位秒
+
+    # 如果未提供API密钥，从环境变量获取
+    if api_key is None:
+        api_key = os.environ.get("GEMINI_API_KEY")
+        if not api_key:
+            logger.error("未提供API密钥且环境变量GEMINI_API_KEY未设置")
+            return None
+
+    for attempt in range(max_retries):
+        try:
+            # 构建请求数据
+            # 修改API请求参数
+            request_data = {
+                "contents": [
+                    {
+                        "parts": [
+                            {"text": prompt},
+                            {"text": json.dumps(articles, ensure_ascii=False)}
+                        ]
+                    }
+                ],
+                "generationConfig": {
+                    "temperature": 0.7,  # 降低温度以获得更稳定的输出
+                    "topK": 40,
+                    "topP": 0.95,
+                    "maxOutputTokens": 100000
                 }
-            ],
-            "generationConfig": {
-                "temperature": 0.7,  # 降低温度以获得更稳定的输出
-                "topK": 40,
-                "topP": 0.95,
-                "maxOutputTokens": 100000
             }
-        }
-        
-        # 发送请求
-        headers = {
-            "Content-Type": "application/json",
-            "x-goog-api-key": api_key
-        }
-        
-        # 获取当前的API URL（可能已被环境变量更新）
-        current_api_url = f"https://generativelanguage.googleapis.com/v1beta/models/{os.environ.get('GEMINI_MODEL', GEMINI_MODEL)}:generateContent"
-        
-        response = requests.post(
-            current_api_url,
-            headers=headers,
-            json=request_data
-        )
-        
-        # 检查响应
-        if response.status_code == 200:
-            result = response.json()
-            if "candidates" in result and len(result["candidates"]) > 0:
-                text = result["candidates"][0]["content"]["parts"][0]["text"]
-                logger.info("成功生成摘要")
-                return text
+            
+            # 发送请求
+            headers = {
+                "Content-Type": "application/json",
+                "x-goog-api-key": api_key
+            }
+            
+            # 获取当前的API URL（可能已被环境变量更新）
+            current_api_url = f"https://generativelanguage.googleapis.com/v1beta/models/{os.environ.get('GEMINI_MODEL', GEMINI_MODEL)}:generateContent"
+            
+            logger.info(f"尝试调用Gemini API (第 {attempt + 1}/{max_retries} 次)")
+            response = requests.post(
+                current_api_url,
+                headers=headers,
+                json=request_data,
+                timeout=300  # 设置请求超时时间为5分钟
+            )
+            
+            # 检查响应
+            if response.status_code == 200:
+                result = response.json()
+                if "candidates" in result and len(result["candidates"]) > 0:
+                    if "content" in result["candidates"][0] and "parts" in result["candidates"][0]["content"] and len(result["candidates"][0]["content"]["parts"]) > 0:
+                        text = result["candidates"][0]["content"]["parts"][0]["text"]
+                        logger.info("成功生成摘要")
+                        return text
+                    else:
+                        logger.error(f"API响应结构不符合预期: {result}")
+                else:
+                    logger.error(f"API响应中没有找到候选结果: {result}")
             else:
-                logger.error(f"API响应中没有找到候选结果: {result}")
-        else:
-            logger.error(f"API请求失败，状态码: {response.status_code}, 响应: {response.text}")
-        
-        return None
-    except Exception as e:
-        logger.error(f"调用Gemini API失败: {str(e)}")
-        return None
+                logger.error(f"API请求失败，状态码: {response.status_code}, 响应: {response.text}")
+            
+            # 如果不是最后一次尝试，并且状态码指示可以重试 (例如 5xx 服务器错误)
+            if attempt < max_retries - 1 and response.status_code >= 500:
+                logger.info(f"API调用失败，将在 {retry_delay} 秒后重试...")
+                time.sleep(retry_delay)
+            elif response.status_code < 500: # 对于客户端错误 (4xx)，通常不应重试
+                logger.error("客户端错误，不进行重试。")
+                return None
+
+        except requests.exceptions.RequestException as e:
+            logger.error(f"调用Gemini API时发生网络或请求错误: {str(e)}")
+            if attempt < max_retries - 1:
+                logger.info(f"网络或请求错误，将在 {retry_delay} 秒后重试...")
+                time.sleep(retry_delay)
+        except Exception as e:
+            logger.error(f"调用Gemini API失败 (尝试 {attempt + 1}/{max_retries}): {str(e)}")
+            if attempt < max_retries - 1:
+                logger.info(f"将在 {retry_delay} 秒后重试...")
+                time.sleep(retry_delay)
+            else:
+                logger.error("已达到最大重试次数，API调用失败。")
+                return None
+    
+    logger.error("所有重试尝试均失败。")
+    return None
 
 
 def save_daily_brief(content, date_str=None):
