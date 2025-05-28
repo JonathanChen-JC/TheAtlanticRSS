@@ -63,14 +63,27 @@ def get_remote_feed():
         
         # 检查响应
         if response.status_code == 200:
-            # 解码内容
             content_data = response.json()
-            if content_data.get("encoding") == "base64":
-                content = base64.b64decode(content_data["content"]).decode("utf-8")
+            encoding = content_data.get("encoding")
+            file_content_raw = content_data.get("content", "")
+
+            if encoding == "base64":
+                content = base64.b64decode(file_content_raw).decode("utf-8")
                 logger.info(f"成功从GitHub获取文件: {FEED_FILE}")
                 return content
+            elif encoding == "none":
+                # 如果编码是 'none'，通常意味着文件是空的。
+                # GitHub API 在文件为空时，content 字段是空字符串 ""
+                if file_content_raw == "":
+                    logger.info(f"GitHub上的文件 {FEED_FILE} 为空 (编码: none, 内容: 空).")
+                    return ""  # 返回空字符串代表空文件
+                else:
+                    # 这种情况理论上不常见，如果encoding是none但content非空
+                    logger.error(f"文件 {FEED_FILE} 编码为 'none' 但内容非空，无法处理: {file_content_raw[:100]}...")
+                    return None # 或者抛出异常，根据业务逻辑决定
             else:
-                logger.error(f"不支持的编码: {content_data.get('encoding')}")
+                logger.error(f"不支持的编码: {encoding}")
+                return None
         elif response.status_code == 404:
             logger.warning(f"GitHub上未找到文件: {FEED_FILE}")
             return None
