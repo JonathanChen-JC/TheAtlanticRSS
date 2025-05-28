@@ -69,9 +69,6 @@ def get_remote_feed():
                 content = base64.b64decode(content_data["content"]).decode("utf-8")
                 logger.info(f"成功从GitHub获取文件: {FEED_FILE}")
                 return content
-            elif content_data.get("encoding") == "none": # 处理空文件的情况
-                logger.info(f"GitHub上的文件 {FEED_FILE} 为空.")
-                return "" # 空文件返回空字符串
             else:
                 logger.error(f"不支持的编码: {content_data.get('encoding')}")
         elif response.status_code == 404:
