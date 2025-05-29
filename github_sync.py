@@ -49,39 +49,65 @@ def get_remote_feed():
         logging.error("无法确定 GitHub owner 或 repo。请检查 GIT_REPO_URL。")
         return None, None
 
-    url = f"https://api.github.com/repos/{OWNER}/{REPO}/contents/{FEED_FILE_PATH}"
+    api_url = f"https://api.github.com/repos/{OWNER}/{REPO}/contents/{FEED_FILE_PATH}"
     try:
-        headers = get_github_api_headers(GIT_TOKEN) # 使用 GIT_TOKEN
+        headers = get_github_api_headers(GIT_TOKEN)
     except ValueError as e:
         logging.error(f"获取 API 请求头失败: {e}")
         return None, None
 
     try:
-        response = requests.get(url, headers=headers)
+        response = requests.get(api_url, headers=headers)
+        logging.info(f"GitHub API /contents 响应状态码: {response.status_code} for URL: {api_url}")
 
         if response.status_code == 200:
             data = response.json()
-            content_base64 = data.get("content")
+            logging.debug(f"GitHub API /contents 完整响应: {data}") # 改为 debug 级别，避免日志过多
+
             sha = data.get("sha")
-            if content_base64 and sha:
+            content_base64 = data.get("content")
+            download_url = data.get("download_url")
+
+            if sha is None:
+                logging.error("GitHub API /contents 响应中缺少 'sha' 字段。")
+                return None, None # SHA 是必须的
+
+            if content_base64:
+                # 文件较小，直接从 content 字段解码
+                logging.info(f"文件 '{FEED_FILE_PATH}' 小于1MB，直接从 content 字段解码。")
                 content_bytes = base64.b64decode(content_base64)
                 content = content_bytes.decode('utf-8')
                 logging.info(f"成功从 GitHub 获取 '{FEED_FILE_PATH}' (SHA: {sha})")
                 return content, sha
+            elif download_url:
+                # 文件较大 (content 为 null)，通过 download_url 获取
+                logging.info(f"文件 '{FEED_FILE_PATH}' 大于1MB 或 content 为空，尝试从 download_url 获取: {download_url}")
+                try:
+                    # 注意：访问 download_url 通常不需要额外的认证头，因为它通常是预签名的 S3 URL
+                    # 但如果遇到权限问题，可以尝试也加上 headers
+                    download_response = requests.get(download_url) # 可以考虑添加 headers=headers 如果需要
+                    download_response.raise_for_status() # 如果下载失败则抛出异常
+                    content = download_response.text # 或者 .content.decode('utf-8') 如果编码有问题
+                    logging.info(f"成功通过 download_url 获取 '{FEED_FILE_PATH}' 内容 (SHA: {sha})")
+                    return content, sha
+                except requests.exceptions.RequestException as e_download:
+                    logging.error(f"通过 download_url 获取文件内容时出错: {e_download}")
+                    return None, None
             else:
-                logging.error("GitHub API 响应缺少 content 或 sha")
+                logging.error(f"GitHub API /contents 响应缺少 'content' 和 'download_url'。无法获取文件内容。SHA: {sha}")
                 return None, None
+
         elif response.status_code == 404:
             logging.info(f"远程仓库中未找到 '{FEED_FILE_PATH}'。将创建新文件。")
             return None, None # 文件不存在，返回 None SHA
         else:
-            logging.error(f"获取远程 feed 失败: {response.status_code} - {response.text}")
+            logging.error(f"获取远程 feed 元数据失败: {response.status_code} - {response.text}")
             return None, None
-    except requests.exceptions.RequestException as e:
-        logging.error(f"请求 GitHub API 时出错: {e}")
+    except requests.exceptions.RequestException as e_api:
+        logging.error(f"请求 GitHub API (/contents) 时出错: {e_api}")
         return None, None
-    except Exception as e:
-        logging.error(f"处理 GitHub API 响应时发生意外错误: {e}")
+    except Exception as e_general:
+        logging.error(f"处理 GitHub API (/contents) 响应时发生意外错误: {e_general}")
         return None, None
 
 
