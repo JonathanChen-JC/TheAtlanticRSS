@@ -70,7 +70,7 @@ def process_articles():
                     rss_generator.save_feed(fg)
                     
                     # 4. 同步到Git仓库
-                    github_sync.main()
+                    github_sync.sync_feed_to_github() # <--- 修改这里
     except Exception as e:
         print(f"处理文章时出错: {str(e)}")
 
@@ -92,7 +92,7 @@ def health_check():
 # 初始化函数
 def init_app():
     # 1. 初始化时同步feed.xml
-    github_sync.main()
+    github_sync.sync_feed_to_github() # <--- 修改这里
     
     # 2. 设置定时任务 - 每天北京时间中午12点执行
     scheduler.add_job(

@@ -1,242 +1,185 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-
 import os
-import sys
-import base64
 import requests
+import base64
 import logging
-import xml.etree.ElementTree as ET
-from datetime import datetime
-from pathlib import Path
+from urllib.parse import urlparse
 
-# 配置日志
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler(sys.stdout)  # 确保日志在Render平台上可见
-    ]
-)
+# --- 配置日志 ---
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-# 配置模块日志记录器
-logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
+# --- 从环境变量读取配置 (保留原项目的环境变量名) ---
+GIT_TOKEN = os.getenv("GIT_TOKEN")
+GIT_REPO_URL = os.getenv("GIT_REPO_URL")
+FEED_FILE_PATH = "feed.xml" # 相对于仓库根目录的文件路径
 
-# 配置
-GIT_REPO_URL = os.getenv('GIT_REPO_URL', '')
-GIT_TOKEN = os.getenv('GIT_TOKEN', '')
-FEED_FILE = 'feed.xml'
-REPO_PATH = Path.cwd()
+def parse_repo_url(url):
+    """从 GitHub URL 解析 owner 和 repo 名称"""
+    if not url:
+        return None, None
+    try:
+        parsed = urlparse(url)
+        path_parts = parsed.path.strip('/').split('/')
+        if len(path_parts) >= 2 and parsed.netloc == "github.com":
+            owner = path_parts[0]
+            repo = path_parts[1].replace('.git', '') # 移除可能的 .git 后缀
+            return owner, repo
+        else:
+            logging.error(f"无法从 URL 解析 owner 和 repo: {url}")
+            return None, None
+    except Exception as e:
+        logging.error(f"解析 URL 时出错 {url}: {e}")
+        return None, None
 
-# 验证环境变量
-if not GIT_REPO_URL.strip():
-    raise ValueError("GIT_REPO_URL环境变量未设置或为空")
-if not GIT_TOKEN.strip():
-    raise ValueError("GIT_TOKEN环境变量未设置或为空")
-if not GIT_REPO_URL.startswith('https://github.com/'):
-    raise ValueError("GIT_REPO_URL必须是有效的GitHub仓库URL")
+OWNER, REPO = parse_repo_url(GIT_REPO_URL) # 使用 GIT_REPO_URL
 
-# 从GIT_REPO_URL中提取仓库所有者和名称
-repo_parts = GIT_REPO_URL.replace('https://github.com/', '').split('/')
-if len(repo_parts) >= 2:
-    REPO_OWNER = repo_parts[0]
-    REPO_NAME = repo_parts[1].replace('.git', '')
-else:
-    raise ValueError("无法从GIT_REPO_URL解析仓库所有者和名称")
-
+def get_github_api_headers(token):
+    """构造 GitHub API 请求头"""
+    if not token:
+        # 根据原 github_sync.py 的风格，这里可以抛出 ValueError 或者仅记录错误并返回 None
+        # github_sync_new.py 抛出 ValueError，这里保持一致
+        raise ValueError("GIT_TOKEN 环境变量未设置")
+    return {
+        "Authorization": f"token {token}",
+        "Accept": "application/vnd.github.v3+json",
+    }
 
 def get_remote_feed():
-    """从GitHub API获取feed.xml内容"""
+    """从 GitHub 仓库获取 feed.xml 的内容和 SHA"""
+    if not OWNER or not REPO:
+        logging.error("无法确定 GitHub owner 或 repo。请检查 GIT_REPO_URL。")
+        return None, None
+
+    url = f"https://api.github.com/repos/{OWNER}/{REPO}/contents/{FEED_FILE_PATH}"
     try:
-        # 构建API URL
-        api_url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/contents/{FEED_FILE}"
-        
-        # 设置请求头
-        headers = {
-            'Authorization': f'Bearer {GIT_TOKEN}',
-            'Accept': 'application/vnd.github.v3+json'
-        }
-        
-        logger.info(f"正在从GitHub API获取文件内容")
-        response = requests.get(api_url, headers=headers)
-        
-        # 检查响应
+        headers = get_github_api_headers(GIT_TOKEN) # 使用 GIT_TOKEN
+    except ValueError as e:
+        logging.error(f"获取 API 请求头失败: {e}")
+        return None, None
+
+    try:
+        response = requests.get(url, headers=headers)
+
         if response.status_code == 200:
-            # 解码内容
-            content_data = response.json()
-            if content_data.get("encoding") == "base64":
-                content = base64.b64decode(content_data["content"]).decode("utf-8")
-                logger.info(f"成功从GitHub获取文件: {FEED_FILE}")
-                return content
+            data = response.json()
+            content_base64 = data.get("content")
+            sha = data.get("sha")
+            if content_base64 and sha:
+                content_bytes = base64.b64decode(content_base64)
+                content = content_bytes.decode('utf-8')
+                logging.info(f"成功从 GitHub 获取 '{FEED_FILE_PATH}' (SHA: {sha})")
+                return content, sha
             else:
-                logger.error(f"不支持的编码: {content_data.get('encoding')}")
+                logging.error("GitHub API 响应缺少 content 或 sha")
+                return None, None
         elif response.status_code == 404:
-            logger.warning(f"GitHub上未找到文件: {FEED_FILE}")
-            return None
+            logging.info(f"远程仓库中未找到 '{FEED_FILE_PATH}'。将创建新文件。")
+            return None, None # 文件不存在，返回 None SHA
         else:
-            logger.error(f"获取GitHub文件失败，状态码: {response.status_code}, 响应: {response.text}")
-        
-        return None
+            logging.error(f"获取远程 feed 失败: {response.status_code} - {response.text}")
+            return None, None
+    except requests.exceptions.RequestException as e:
+        logging.error(f"请求 GitHub API 时出错: {e}")
+        return None, None
     except Exception as e:
-        logger.error(f"从GitHub获取文件时出错: {str(e)}")
-        return None
+        logging.error(f"处理 GitHub API 响应时发生意外错误: {e}")
+        return None, None
 
 
-def update_github_file(content, commit_message="Update feed.xml"):
-    """更新GitHub上的文件"""
+def push_feed_to_github(local_file_path, commit_message, remote_sha):
+    """将本地 feed.xml 推送到 GitHub 仓库"""
+    if not OWNER or not REPO:
+        logging.error("无法确定 GitHub owner 或 repo。请检查 GIT_REPO_URL。")
+        return False
+
+    if not os.path.exists(local_file_path):
+        logging.error(f"本地文件未找到: {local_file_path}")
+        return False
+
+    url = f"https://api.github.com/repos/{OWNER}/{REPO}/contents/{FEED_FILE_PATH}"
     try:
-        # 构建API URL
-        api_url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/contents/{FEED_FILE}"
-        
-        # 设置请求头
-        headers = {
-            'Authorization': f'Bearer {GIT_TOKEN}',
-            'Accept': 'application/vnd.github.v3+json'
-        }
-        
-        # 获取当前文件信息以获取SHA
-        response = requests.get(api_url, headers=headers)
-        
-        # 准备更新数据
-        update_data = {
+        headers = get_github_api_headers(GIT_TOKEN) # 使用 GIT_TOKEN
+    except ValueError as e:
+        logging.error(f"获取 API 请求头失败: {e}")
+        return False
+
+    try:
+        with open(local_file_path, 'rb') as f:
+            content_bytes = f.read()
+
+        content_base64 = base64.b64encode(content_bytes).decode('utf-8')
+
+        data = {
             "message": commit_message,
-            "content": base64.b64encode(content.encode("utf-8")).decode("utf-8"),
-            "branch": "main"  # 默认使用main分支
+            "content": content_base64,
+            "branch": "main" # 或者你的默认分支名
         }
-        
-        # 如果文件已存在，添加SHA
+
+        # 如果 remote_sha 存在，说明是更新现有文件，需要提供 SHA
+        if remote_sha:
+            data["sha"] = remote_sha
+        # 如果 remote_sha 为 None，说明是创建新文件，不需要 SHA
+
+        response = requests.put(url, headers=headers, json=data)
+
         if response.status_code == 200:
-            file_sha = response.json()["sha"]
-            update_data["sha"] = file_sha
-        elif response.status_code != 404:
-            logger.error(f"获取文件信息失败，状态码: {response.status_code}, 响应: {response.text}")
-            return False
-        
-        # 发送更新请求
-        response = requests.put(api_url, headers=headers, json=update_data)
-        
-        # 检查响应
-        if response.status_code in [200, 201]:
-            logger.info(f"成功更新GitHub文件: {FEED_FILE}")
+            logging.info(f"成功更新远程 '{FEED_FILE_PATH}'")
+            return True
+        elif response.status_code == 201:
+            logging.info(f"成功创建远程 '{FEED_FILE_PATH}'")
             return True
         else:
-            logger.error(f"更新GitHub文件失败，状态码: {response.status_code}, 响应: {response.text}")
+            logging.error(f"推送 feed 到 GitHub 失败: {response.status_code} - {response.text}")
+            try:
+                error_data = response.json()
+                logging.error(f"GitHub API 错误详情: {error_data.get('message', '无详细信息')}")
+            except Exception:
+                pass
             return False
-    
+
+    except requests.exceptions.RequestException as e:
+        logging.error(f"请求 GitHub API 时出错: {e}")
+        return False
     except Exception as e:
-        logger.error(f"更新GitHub文件时出错: {str(e)}")
+        logging.error(f"读取本地文件或处理推送时发生意外错误: {e}")
         return False
 
+def sync_feed_to_github():
+    """执行核心的 feed 文件同步逻辑"""
+    if not GIT_TOKEN or not GIT_REPO_URL:
+        logging.error("错误：请设置 GIT_TOKEN 和 GIT_REPO_URL 环境变量。")
+        return False # 或者可以抛出异常
+    elif not OWNER or not REPO:
+        logging.error("错误：无法从 GIT_REPO_URL 解析仓库信息。请检查其格式。")
+        return False
 
-def parse_build_date(xml_content, is_file=False):
-    """解析XML中的lastBuildDate"""
-    try:
-        if is_file:
-            tree = ET.parse(xml_content)
-            root = tree.getroot()
-        else:
-            root = ET.fromstring(xml_content)
-        
-        build_date = root.find('.//lastBuildDate')
-        if build_date is None or not build_date.text:
-            return None
-        
-        return datetime.strptime(build_date.text, '%a, %d %b %Y %H:%M:%S %z')
-    except (ET.ParseError, ValueError) as e:
-        logger.error(f"解析lastBuildDate失败：{str(e)}")
-        return None
+    logging.info(f"配置: Owner={OWNER}, Repo={REPO}")
 
+    # 1. 尝试获取远程文件
+    logging.info(f"--- 正在尝试从 GitHub 获取 {FEED_FILE_PATH} ---")
+    remote_content, current_sha = get_remote_feed()
 
-def compare_feeds(local_feed, remote_feed):
-    """比较本地和远程feed的lastBuildDate"""
-    logger.info("开始比较本地和远程feed文件")
-    
-    local_date = parse_build_date(local_feed, is_file=True)
-    remote_date = parse_build_date(remote_feed)
-    
-    if local_date is None and remote_date is None:
-        logger.warning("无法解析两个文件的lastBuildDate")
-        return 'local'
-    elif local_date is None:
-        logger.info("本地文件日期无法解析，使用远程文件")
-        return 'remote'
-    elif remote_date is None:
-        logger.info("远程文件日期无法解析，使用本地文件")
-        return 'local'
-    
-    if local_date > remote_date:
-        logger.info("本地feed更新，使用本地文件")
-        return 'local'
-    elif remote_date > local_date:
-        logger.info("远程feed更新，使用远程文件")
-        return 'remote'
-    else:
-        logger.info("feed的lastBuildDate相同，无需更改")
-        return 'same'
+    if remote_content is not None:
+        logging.info(f"成功获取远程内容 (SHA: {current_sha})。")
+    elif current_sha is None and remote_content is None:
+        logging.warning(f"远程文件 {FEED_FILE_PATH} 不存在或获取失败。")
+    # else: # file not found case
+        # logging.info(f"远程文件 {FEED_FILE_PATH} 不存在。")
 
-
-def sync_to_repo():
-    """同步本地更改到GitHub仓库"""
-    try:
-        # 读取本地文件内容
-        local_feed = Path(FEED_FILE)
-        if not local_feed.exists():
-            logger.error(f"本地文件不存在: {FEED_FILE}")
-            return False
-            
-        with open(local_feed, 'r', encoding='utf-8') as f:
-            local_content = f.read()
-        
-        # 更新GitHub文件
-        success = update_github_file(local_content, "Update feed.xml")
-        
+    # 2. 准备一个本地文件用于测试推送
+    if os.path.exists(FEED_FILE_PATH):
+        logging.info(f"--- 正在尝试将本地 {FEED_FILE_PATH} 推送到 GitHub ---")
+        commit_msg = f"Update {FEED_FILE_PATH} via script"
+        success = push_feed_to_github(FEED_FILE_PATH, commit_msg, current_sha)
         if success:
-            logger.info("成功同步到GitHub仓库")
+            logging.info("推送成功！")
+            return True
         else:
-            logger.error("同步到GitHub仓库失败")
-        
-        return success
-    except Exception as e:
-        logger.error(f"同步到GitHub仓库失败：{str(e)}")
-        return False
+            logging.error("推送失败。")
+            return False
+    else:
+        logging.info(f"跳过推送，因为本地文件 {FEED_FILE_PATH} 不存在。")
+        return False # 或者根据需求返回其他状态
 
-
-def main():
-    """主函数"""
-    try:
-        logger.info("开始Git同步操作")
-        local_feed = Path(FEED_FILE)
-        
-        # 处理本地文件不存在或为空的情况
-        if not local_feed.exists() or local_feed.stat().st_size == 0:
-            remote_feed = get_remote_feed()
-            if remote_feed:
-                with open(local_feed, 'w', encoding='utf-8') as f:
-                    f.write(remote_feed)
-                logger.info("已从远程仓库获取并创建本地文件")
-            else:
-                logger.error("无法获取远程feed内容，同步操作终止")
-                return
-        
-        # 获取远程feed内容并比较
-        remote_feed = get_remote_feed()
-        if not remote_feed:
-            logger.error("无法获取远程feed内容，同步操作终止")
-            return
-        
-        result = compare_feeds(local_feed, remote_feed)
-        if result == 'remote':
-            with open(local_feed, 'w', encoding='utf-8') as f:
-                f.write(remote_feed)
-            logger.info("已更新本地文件")
-        elif result == 'local':
-            sync_to_repo()
-        
-        logger.info("Git同步操作完成")
-    except Exception as e:
-        logger.error(f"同步操作失败：{str(e)}")
-
-
+# --- 主执行逻辑 (用于直接运行脚本) ---
 if __name__ == "__main__":
-    main()
+    sync_feed_to_github() # 调用新的主函数
